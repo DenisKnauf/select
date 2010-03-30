@@ -20,7 +20,7 @@ class Select
 	def initialize timeout = 30
 		@read, @write, @error = {}, {}, {}
 		@read.default = @write.default = @error.default = lambda{}
-		@timeout, @tevent, @exit = timeout, lambda{}, false
+		@timeout, @tevent, @exit, @exit_on_empty = timeout, lambda{}, false, true
 	end
 
 	def timeout timeout = nil, &event
