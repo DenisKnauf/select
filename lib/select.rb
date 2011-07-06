@@ -18,7 +18,7 @@ class Select
 	end
 
 	def initialize timeout = 30
-		@read, @write, @error = {}, {}, {}
+		@read, @write, @error, @times = {}, {}, {}, []
 		@read.default = @write.default = @error.default = proc{}
 		@timeout, @tevent, @exit, @exit_on_empty = timeout, proc{}, false, true
 	end
@@ -68,21 +68,56 @@ class Select
 
 	def run_once timeout = @timeout
 		r, w, e = Kernel.select( @read.keys, @write.keys, @error.keys, timeout)
-		return @tevent.call  unless r or w or e
-		r.each {|h|   @read[ h].call h, :read   }
-		w.each {|h|  @write[ h].call h, :write  }
-		e.each {|h|  @error[ h].call h, :error  }
+		r and r.each {|h|   @read[ h].call h, :read   }
+		w and w.each {|h|  @write[ h].call h, :write  }
+		e and e.each {|h|  @error[ h].call h, :error  }
 	end
 
 	def run &e
 		if e
 			until @exit || (@exit_on_empty && self.empty?)
-				self.run_once
+				cron
+				self.run_once 1
 				e.call
 			end
 		else
-			self.run_once  until @exit || (@exit_on_empty && self.empty?)
+			until @exit || (@exit_on_empty && self.empty?)
+				cron
+				self.run_once 1
+			end
 		end
+	end
+
+	attr_reader :times
+	def cron
+		@times.each do |e|
+			return if e > Time.now
+			e.call
+			@times.shift
+		end
+	end
+
+	class Entry < Time
+		attr_reader :do
+		def do &e
+			@do = e
+		end
+
+		def call *p
+			@do.call *p
+		end
+
+		def self.new *a, &e
+			x = self.at *a
+			x.do &e
+			x
+		end
+	end
+
+	def at a, &e
+		a = Entry.new a, &e if e
+		@times << a
+		@times.sort!
 	end
 end
 
