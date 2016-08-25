@@ -1,87 +1,168 @@
+# IO-Management
+# Fires if IO is ready a given block.
+#
+#   Select.open do |sel|
+#     sock = TCPSocket.new 'localhost', 8090
+#     buffer = ''
+#
+#     sel.on_read serv do |sock|
+#				buffer << sock.sysread
+#     end
+#
+#     sel.on_write STDOUT do |sock|
+#       return  if buffer.empty?
+#       written = sock.syswrite buffer
+#       buffer = buffer[written..-1]
+#     end
+#
+#     sel.on_error sock do |sock|
+#			  sel.close
+#     end
+#   end
+
 class Select
 	READ, WRITE, ERROR = 1, 2, 3
 
 	attr_reader :read, :write, :error
 	attr_accessor :exit, :exit_on_empty
 
+	# There are no events to wait?
 	def empty?
 		@read.empty? && @write.empty? && @error.empty?
 	end
 
-	def self.new *p, &e
-		r = super *p
-		if e
-			e.call r
-			r.close
-		else r
+	class <<self
+		# Creates a new Select-instance.
+		# If you use a block, Select will close all IOs on end.
+		def self.new *args, &exe
+			r = super *args
+			if exe
+				yield r
+				r.close
+			else r
+			end
 		end
+		alias open new
 	end
 
 	def initialize timeout = 30
 		@read, @write, @error, @times = {}, {}, {}, []
 		@read.default = @write.default = @error.default = proc{}
 		@timeout, @tevent, @exit, @exit_on_empty = timeout, proc{}, false, true
+		@pause = {read: {}, write: {}, error: {}}
 	end
 
 	def timeout timeout = nil, &event
 		return @timeout  if timeout.nil?
-		raise ArgumentError, "Numeric value expected, not: '#{timeout}'"  unless timeout.kind_of? Numeric
+		raise ArgumentError, "Numeric value expected, not: '#{timeout}'"  unless Numeric === timeout
 		@timeout = timeout
 		@tevent = event  if event
 		timeout
 	end
 
-	def set hook, type = :read, &event
-		raise ArgumentError, "This hook isn't supported: '#{hook.inspect}'"  unless hook.kind_of? IO
-		raise ArgumentError, "Unexpected Event: '#{event.inspect}'"  unless event.kind_of? Proc
+	def set io, type = :read, &event
+		#raise ArgumentError, "This io isn't supported: '#{io.inspect}'"  unless IO === io
+		#raise ArgumentError, "Unexpected Event: '#{event.inspect}'"  unless Proc === event
 		case type
-		when  READ, :read   then  @read[ hook] = event
-		when WRITE, :write  then @write[ hook] = event
-		when ERROR, :error  then @error[ hook] = event
-		when nil
-			@read[ hook] = event
-			@write[ hook] = event
-			@error[ hook] = event
-		else raise ArgumentError, "Unknown event-type: '#{type}'"
+		when  READ, :read   then  @read[ io] = event
+		when WRITE, :write  then @write[ io] = event
+		when ERROR, :error  then @error[ io] = event
+		when nil, :all
+			@read[ io] = event
+			@write[ io] = event
+			@error[ io] = event
+		else
+			raise ArgumentError, "Unknown event-type: '#{type}'"
+		end
+	end
+	alias on set
+
+	def pause io, type = :read
+		case type
+		when  READ, :read   then @pause[ :read][  io] = @read.delete io
+		when WRITE, :write  then @pause[ :write][ io] = @write.delete io
+		when ERROR, :error  then @pause[ :error][ io] = @error.delete io
+		when nil, :all
+			@pause[ :read][ io] = @read.delete io
+			@pause[ :write][ io] = @write.delete io
+			@pause[ :error][ io] = @error.delete io
+		else
+			raise ArgumentError, "Unknown event-type: '#{type}'"
 		end
 	end
 
-	def del hook, type = nil
+	def unpause io, type = :read
 		case type
-		when  READ, :read   then @read.delete hook
-		when WRITE, :write  then @write.delete hook
-		when ERROR, :error  then @error.delete hook
-		when nil
-			@read.delete hook
-			@write.delete hook
-			@error.delete hook
-		else raise ArgumentError, "Unknown event-type: '#{type}'"
+		when  READ, :read   then @read[  io] = @pause[ :read].delete io
+		when WRITE, :write  then @write[ io] = @pause[ :write].delete io
+		when ERROR, :error  then @error[ io] = @pause[ :error].delete io
+		when nil, :all
+			@read[  io] = @pause[ :read].delete io
+			@write[ io] = @pause[ :write].delete io
+			@error[ io] = @pause[ :error].delete io
+		else
+			raise ArgumentError, "Unknown event-type: '#{type}'"
 		end
 	end
 
-	def  read_set( hook, &event)  self.set hook,  :read, &event  end
-	def write_set( hook, &event)  self.set hook, :write, &event  end
-	def error_set( hook, &event)  self.set hook, :error, &event  end
-	def  read_del( hook)   @read.delete hook  end
-	def write_del( hook)  @write.delete hook  end
-	def error_del( hook)  @error.delete hook  end
+	# Removes object from notification.
+	# If type is read/write/error, only this, else all.
+	def del io, type = nil
+		case type
+		when  READ, :read   then @read.delete io
+		when WRITE, :write  then @write.delete io
+		when ERROR, :error  then @error.delete io
+		when nil, :all
+			@read.delete io
+			@write.delete io
+			@error.delete io
+		else
+			raise ArgumentError, "Unknown event-type: '#{type}'"
+		end
+	end
+	alias off del
 
-	def run_once timeout = @timeout
+	def  read_set( io, &event)  self.set io,  :read, &event  end
+	def write_set( io, &event)  self.set io, :write, &event  end
+	def error_set( io, &event)  self.set io, :error, &event  end
+	def  read_del( io)   @read.delete io  end
+	def write_del( io)  @write.delete io  end
+	def error_del( io)  @error.delete io  end
+	alias on_read read_set
+	alias on_write write_set
+	alias on_error error_set
+	alias off_read read_del
+	alias off_write write_del
+	alias off_error error_del
+
+	# only once this will be fired
+	def one io, type = :read, &exe
+		on io, type do |*args|
+			off io, type
+			yield *args
+		end
+	end
+
+	# Runs once.
+	# Every ready disposed to read/write or has an error, will be fired.
+	def run_once timeout = nil
+		timeout ||= @timeout
 		r, w, e = Kernel.select( @read.keys, @write.keys, @error.keys, timeout)
 		r and r.each {|h|   @read[ h].call h, :read   }
 		w and w.each {|h|  @write[ h].call h, :write  }
 		e and e.each {|h|  @error[ h].call h, :error  }
 	end
 
+	# Runs in a loop
 	def run &e
 		if e
-			until @exit || (@exit_on_empty && self.empty?)
+			until @exit || (@exit_on_empty && empty?)
 				cron
 				self.run_once 1
 				e.call
 			end
 		else
-			until @exit || (@exit_on_empty && self.empty?)
+			until @exit || (@exit_on_empty && empty?)
 				cron
 				self.run_once 1
 			end
@@ -152,11 +233,11 @@ class Select::Socket
 		@select.error_set @sock, &method( :event_error)
 	end
 
-	def init opts
-		@select  = opts[ :select]  || Select.new
-		@sock    = opts[ :sock]    || raise( ArgumentError, "need sock")
-		@bufsize = opts[ :bufsize] || 4096
-		@parent  = opts[ :parent]  || nil
+	def init sock: , delimiter: nil, select: nil, bufsize: nil, parent: nil
+		@sock    = sock
+		@select  = select  || Select.new
+		@bufsize = bufsize || 4096
+		@parent  = parent  || nil
 		self.delimiter = opts[ :delimiter] || $/
 		@linebuf, @writebuf = Select::Buffer.new(""), Select::Buffer.new("")
 	end
@@ -242,10 +323,10 @@ class Select::Server
 		select.read_set @sock, &self.method( :event_conn)
 	end
 
-	def init opts
-		@sock = opts[ :sock] || raise( ArgumentError, "need sock")
-		@select = opts[ :select] || Select.new
-		@clientclass = opts[ :clientclass] || Select::Socket
+	def init sock: , select: nil, clientclass: nil
+		@sock = sock
+		@select = select || Select.new
+		@clientclass = clientclass || Select::Socket
 		@clients = []
 	end
 
